@@ -1,52 +1,67 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
+from sse_starlette.sse import EventSourceResponse
 import asyncio
+from pydantic import BaseModel
+from typing import List
+import time
 
-from .api.v1 import router as api_router
-from .services.realtime import broadcaster
+app = FastAPI()
 
-app = FastAPI(title="SST Platform API")
-
+# Allow frontend to connect
+origins = ["http://localhost:5173"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # restrict this in production
-    allow_credentials=True,
+    allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Incident model
+class Incident(BaseModel):
+    id: int
+    title: str
+    description: str = ""
+    latitude: float
+    longitude: float
+    status: str = "reported"
+    timestamp: float = time.time()
 
-@app.get("/healthz")
-async def health_check():
-    return {"status": "ok"}
+# In-memory incidents list (demo purposes)
+incidents: List[Incident] = [
+    Incident(id=1, title="Pothole on Main St.", latitude=54.787, longitude=32.048, status="active"),
+    Incident(id=2, title="Traffic jam", latitude=54.788, longitude=32.050, status="reported")
+]
 
+# SSE subscribers
+subscribers = []
 
-app.include_router(api_router, prefix="/api/v1")
+@app.get("/api/v1/incidents")
+async def get_incidents():
+    return incidents
 
-
-# SSE stream endpoint
-async def event_generator(q: asyncio.Queue):
-    try:
-        while True:
-            payload = await q.get()
-            # SSE frame
-            yield f"data: {payload}\n\n"
-    except asyncio.CancelledError:
-        # client disconnected
-        return
-
+@app.post("/api/v1/incidents")
+async def create_incident(incident: Incident):
+    incidents.append(incident)
+    # notify SSE subscribers
+    for queue in subscribers:
+        await queue.put({"type": "incident.created", "data": incident.dict()})
+    return incident
 
 @app.get("/api/v1/stream")
-async def stream():
-    client_id, q = await broadcaster.register()
-    # remove client on disconnect
-    async def gen():
+async def stream(request: Request):
+    q = asyncio.Queue()
+    subscribers.append(q)
+
+    async def event_generator():
         try:
-            async for chunk in event_generator(q):
-                yield chunk
+            while True:
+                if await request.is_disconnected():
+                    break
+                item = await q.get()
+                yield {"event": "message", "data": item}
         finally:
-            await broadcaster.unregister(client_id)
+            subscribers.remove(q)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
+    return EventSourceResponse(event_generator())

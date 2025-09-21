@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from "react";
-import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import { useEffect, useState } from "react";
+import { MapContainer, TileLayer, Marker, Popup, useMapEvents } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
-
-// Fix default marker icon issue in React-Leaflet
 import L from "leaflet";
+
+// Fix default marker icon for Vite + React
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl:
@@ -14,45 +14,126 @@ L.Icon.Default.mergeOptions({
     "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png",
 });
 
+// Google Maps-style user location icon
+const userIcon = new L.Icon({
+  iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+  iconSize: [32, 32],
+  iconAnchor: [16, 32],
+  popupAnchor: [0, -32],
+});
+
+// Colored markers for incidents
+const statusColors = {
+  reported: "yellow",
+  active: "red",
+  resolved: "green",
+};
+const createColoredIcon = (color) =>
+  new L.Icon({
+    iconUrl: `https://maps.google.com/mapfiles/ms/icons/${color}-dot.png`,
+    iconSize: [32, 32],
+    iconAnchor: [16, 32],
+    popupAnchor: [0, -32],
+  });
+
+// Component to handle map clicks
+const AddIncidentMarker = ({ addIncident }) => {
+  useMapEvents({
+    click(e) {
+      const title = prompt("Enter incident title:");
+      if (!title) return;
+      const description = prompt("Enter description (optional):");
+      const newIncident = {
+        id: Date.now(),
+        title,
+        description,
+        latitude: e.latlng.lat,
+        longitude: e.latlng.lng,
+        status: "reported",
+      };
+      // POST to backend
+      fetch("http://localhost:8000/api/v1/incidents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newIncident),
+      }).then(res => res.json())
+        .then(data => addIncident(data))
+        .catch(err => console.error(err));
+    },
+  });
+  return null;
+};
+
 export default function IncidentMap() {
   const [incidents, setIncidents] = useState([]);
+  const [userPos, setUserPos] = useState(null);
 
-  // Fetch initial incidents
+  // Fetch incidents from backend on mount
   useEffect(() => {
     fetch("http://localhost:8000/api/v1/incidents")
-      .then((res) => res.json())
+      .then(res => res.json())
       .then(setIncidents)
-      .catch(console.error);
+      .catch(err => console.error(err));
   }, []);
 
-  // Setup SSE listener
+  // SSE for live updates
   useEffect(() => {
-    const eventSource = new EventSource("http://localhost:8000/api/v1/stream");
-    eventSource.onmessage = (event) => {
-      const parsed = JSON.parse(event.data);
-      if (parsed.type === "incident.created") {
-        setIncidents((prev) => [parsed.data, ...prev]);
+    const es = new EventSource("http://localhost:8000/api/v1/stream");
+    es.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        if (parsed.type === "incident.created") {
+          setIncidents(prev => [parsed.data, ...prev]);
+        }
+      } catch (err) {
+        console.error("SSE parse error:", err);
       }
     };
-    return () => eventSource.close();
+    es.onerror = () => es.close();
+    return () => es.close();
+  }, []);
+
+  // Get user location
+  useEffect(() => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => setUserPos({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        (err) => console.warn("Geolocation error:", err)
+      );
+    }
   }, []);
 
   return (
-    <div className="w-full h-[600px]">
-      <MapContainer center={[54.786, 32.049]} zoom={13} className="w-full h-full">
+    <div className="w-full h-[600px] rounded-lg shadow-lg overflow-hidden">
+      <MapContainer
+        center={[54.786, 32.049]}
+        zoom={13}
+        style={{ width: "100%", height: "100%" }}
+        attributionControl={false}
+      >
         <TileLayer
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          attribution='&copy; <a href="http://osm.org/copyright">OpenStreetMap</a>'
+          url="https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"
+          attribution=""
         />
+
+        <AddIncidentMarker addIncident={(inc) => setIncidents(prev => [inc, ...prev])} />
+
+        {userPos && (
+          <Marker position={[userPos.lat, userPos.lng]} icon={userIcon}>
+            <Popup>Your location 📍</Popup>
+          </Marker>
+        )}
+
         {incidents.map((inc) => (
           <Marker
             key={inc.id}
-            position={[inc.latitude || 54.786, inc.longitude || 32.049]}
+            position={[inc.latitude, inc.longitude]}
+            icon={createColoredIcon(statusColors[inc.status] || "blue")}
           >
-            <Popup>
-              <strong>{inc.title}</strong>
-              <br />
-              Status: {inc.status}
+            <Popup className="text-sm">
+              <div className="font-bold">{inc.title}</div>
+              <div className="text-gray-600">Status: {inc.status}</div>
+              {inc.description && <div className="mt-1 text-gray-800">{inc.description}</div>}
             </Popup>
           </Marker>
         ))}
@@ -60,3 +141,4 @@ export default function IncidentMap() {
     </div>
   );
 }
+
